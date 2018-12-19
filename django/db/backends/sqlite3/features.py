@@ -1,3 +1,5 @@
+import sys
+
 from django.db import utils
 from django.db.backends.base.features import BaseDatabaseFeatures
 from django.utils.functional import cached_property
@@ -6,37 +8,39 @@ from .base import Database
 
 
 class DatabaseFeatures(BaseDatabaseFeatures):
-    # SQLite cannot handle us only partially reading from a cursor's result set
-    # and then writing the same rows to the database in another cursor. This
-    # setting ensures we always read result sets fully into memory all in one
-    # go.
-    can_use_chunked_reads = False
+    # SQLite can read from a cursor since SQLite 3.6.5, subject to the caveat
+    # that statements within a connection aren't isolated from each other. See
+    # https://sqlite.org/isolation.html.
+    can_use_chunked_reads = True
     test_db_allows_multiple_connections = False
     supports_unspecified_pk = True
     supports_timezones = False
     max_query_params = 999
     supports_mixed_date_datetime_comparisons = False
-    supports_column_check_constraints = False
-    autocommits_when_autocommit_is_off = True
+    autocommits_when_autocommit_is_off = sys.version_info < (3, 6)
     can_introspect_decimal_field = False
+    can_introspect_duration_field = False
     can_introspect_positive_integer_field = True
     can_introspect_small_integer_field = True
     supports_transactions = True
     atomic_transactions = False
     can_rollback_ddl = True
+    supports_atomic_references_rename = Database.version_info >= (3, 26, 0)
     supports_paramstyle_pyformat = False
     supports_sequence_reset = False
     can_clone_databases = True
     supports_temporal_subtraction = True
     ignores_table_name_case = True
     supports_cast_with_precision = False
-    uses_savepoints = Database.sqlite_version_info >= (3, 6, 8)
-    supports_index_column_ordering = Database.sqlite_version_info >= (3, 3, 0)
-    can_release_savepoints = uses_savepoints
-    can_share_in_memory_db = (
-        Database.__name__ == 'sqlite3.dbapi2' and
-        Database.sqlite_version_info >= (3, 7, 13)
-    )
+    time_cast_precision = 3
+    can_release_savepoints = True
+    supports_partial_indexes = Database.version_info >= (3, 8, 0)
+    # Is "ALTER TABLE ... RENAME COLUMN" supported?
+    can_alter_table_rename_column = Database.sqlite_version_info >= (3, 25, 0)
+    supports_parentheses_in_compound = False
+    # Deferred constraint checks can be emulated on SQLite < 3.20 but not in a
+    # reasonably performant way.
+    can_defer_constraint_checks = Database.version_info >= (3, 20, 0)
 
     @cached_property
     def supports_stddev(self):

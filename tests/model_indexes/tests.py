@@ -1,6 +1,8 @@
 from django.conf import settings
 from django.db import connection, models
+from django.db.models.query_utils import Q
 from django.test import SimpleTestCase, skipUnlessDBFeature
+from django.test.utils import isolate_apps
 
 from .models import Book, ChildModel1, ChildModel2
 
@@ -13,8 +15,10 @@ class IndexesTests(SimpleTestCase):
     def test_repr(self):
         index = models.Index(fields=['title'])
         multi_col_index = models.Index(fields=['title', 'author'])
+        partial_index = models.Index(fields=['title'], name='long_books_idx', condition=Q(pages__gt=400))
         self.assertEqual(repr(index), "<Index: fields='title'>")
         self.assertEqual(repr(multi_col_index), "<Index: fields='title, author'>")
+        self.assertEqual(repr(partial_index), "<Index: fields='title', condition=(AND: ('pages__gt', 400))>")
 
     def test_eq(self):
         index = models.Index(fields=['title'])
@@ -27,13 +31,37 @@ class IndexesTests(SimpleTestCase):
         self.assertNotEqual(index, another_index)
 
     def test_index_fields_type(self):
-        with self.assertRaisesMessage(ValueError, 'Index.fields must be a list.'):
+        with self.assertRaisesMessage(ValueError, 'Index.fields must be a list or tuple.'):
             models.Index(fields='title')
+
+    def test_fields_tuple(self):
+        self.assertEqual(models.Index(fields=('title',)).fields, ['title'])
 
     def test_raises_error_without_field(self):
         msg = 'At least one field is required to define an index.'
         with self.assertRaisesMessage(ValueError, msg):
             models.Index()
+
+    def test_opclasses_requires_index_name(self):
+        with self.assertRaisesMessage(ValueError, 'An index must be named to use opclasses.'):
+            models.Index(opclasses=['jsonb_path_ops'])
+
+    def test_opclasses_requires_list_or_tuple(self):
+        with self.assertRaisesMessage(ValueError, 'Index.opclasses must be a list or tuple.'):
+            models.Index(name='test_opclass', fields=['field'], opclasses='jsonb_path_ops')
+
+    def test_opclasses_and_fields_same_length(self):
+        msg = 'Index.fields and Index.opclasses must have the same number of elements.'
+        with self.assertRaisesMessage(ValueError, msg):
+            models.Index(name='test_opclass', fields=['field', 'other'], opclasses=['jsonb_path_ops'])
+
+    def test_condition_requires_index_name(self):
+        with self.assertRaisesMessage(ValueError, 'An index must be named to use condition.'):
+            models.Index(condition=Q(pages__gt=400))
+
+    def test_condition_must_be_q(self):
+        with self.assertRaisesMessage(ValueError, 'Index.condition must be a Q instance.'):
+            models.Index(condition='invalid', name='long_book_idx')
 
     def test_max_name_length(self):
         msg = 'Index names cannot be longer than 30 characters.'
@@ -70,6 +98,18 @@ class IndexesTests(SimpleTestCase):
         with self.assertRaisesMessage(AssertionError, msg):
             long_field_index.set_name_with_model(Book)
 
+    @isolate_apps('model_indexes')
+    def test_name_auto_generation_with_quoted_db_table(self):
+        class QuotedDbTable(models.Model):
+            name = models.CharField(max_length=50)
+
+            class Meta:
+                db_table = '"t_quoted"'
+
+        index = models.Index(fields=['name'])
+        index.set_name_with_model(QuotedDbTable)
+        self.assertEqual(index.name, 't_quoted_name_e4ed1b_idx')
+
     def test_deconstruction(self):
         index = models.Index(fields=['title'], db_tablespace='idx_tbls')
         index.set_name_with_model(Book)
@@ -79,6 +119,25 @@ class IndexesTests(SimpleTestCase):
         self.assertEqual(
             kwargs,
             {'fields': ['title'], 'name': 'model_index_title_196f42_idx', 'db_tablespace': 'idx_tbls'}
+        )
+
+    def test_deconstruct_with_condition(self):
+        index = models.Index(
+            name='big_book_index',
+            fields=['title'],
+            condition=Q(pages__gt=400),
+        )
+        index.set_name_with_model(Book)
+        path, args, kwargs = index.deconstruct()
+        self.assertEqual(path, 'django.db.models.Index')
+        self.assertEqual(args, ())
+        self.assertEqual(
+            kwargs,
+            {
+                'fields': ['title'],
+                'name': 'model_index_title_196f42_idx',
+                'condition': Q(pages__gt=400),
+            }
         )
 
     def test_clone(self):

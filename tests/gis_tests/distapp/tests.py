@@ -5,7 +5,7 @@ from django.contrib.gis.db.models.functions import (
 )
 from django.contrib.gis.geos import GEOSGeometry, LineString, Point
 from django.contrib.gis.measure import D  # alias for Distance
-from django.db import connection
+from django.db import NotSupportedError, connection
 from django.db.models import F, Q
 from django.test import TestCase, skipIfDBFeature, skipUnlessDBFeature
 
@@ -81,11 +81,7 @@ class DistanceTest(TestCase):
         # Now performing the `dwithin` queries on a geodetic coordinate system.
         for dist in au_dists:
             with self.subTest(dist=dist):
-                if isinstance(dist, D) and not oracle:
-                    type_error = True
-                else:
-                    type_error = False
-
+                type_error = isinstance(dist, D) and not oracle
                 if isinstance(dist, tuple):
                     if oracle or spatialite:
                         # Result in meters
@@ -474,7 +470,7 @@ class DistanceFunctionsTests(FuncTestMixin, TestCase):
             # TODO: test with spheroid argument (True and False)
         else:
             # Does not support geodetic coordinate systems.
-            with self.assertRaises(NotImplementedError):
+            with self.assertRaises(NotSupportedError):
                 list(Interstate.objects.annotate(length=Length('path')))
 
         # Now doing length on a projected coordinate system.
@@ -513,7 +509,7 @@ class DistanceFunctionsTests(FuncTestMixin, TestCase):
         if connection.features.supports_perimeter_geodetic:
             self.assertAlmostEqual(qs1[0].perim.m, 18406.3818954314, 3)
         else:
-            with self.assertRaises(NotImplementedError):
+            with self.assertRaises(NotSupportedError):
                 list(qs1)
         # But should work fine when transformed to projected coordinates
         qs2 = CensusZipcode.objects.annotate(perim=Perimeter(Transform('poly', 32140))).filter(name='77002')

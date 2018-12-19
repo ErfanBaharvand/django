@@ -4,7 +4,6 @@ Classes to represent the definitions of aggregate functions.
 from django.core.exceptions import FieldError
 from django.db.models.expressions import Case, Func, Star, When
 from django.db.models.fields import DecimalField, FloatField, IntegerField
-from django.db.models.query_utils import Q
 
 __all__ = [
     'Aggregate', 'Avg', 'Count', 'Max', 'Min', 'StdDev', 'Sum', 'Variance',
@@ -28,19 +27,17 @@ class Aggregate(Func):
     def get_source_expressions(self):
         source_expressions = super().get_source_expressions()
         if self.filter:
-            source_expressions += [self.filter]
+            return source_expressions + [self.filter]
         return source_expressions
 
     def set_source_expressions(self, exprs):
-        if self.filter:
-            self.filter = exprs.pop()
+        self.filter = self.filter and exprs.pop()
         return super().set_source_expressions(exprs)
 
     def resolve_expression(self, query=None, allow_joins=True, reuse=None, summarize=False, for_save=False):
         # Aggregates are not allowed in UPDATE queries, so ignore for_save
         c = super().resolve_expression(query, allow_joins, reuse, summarize)
-        if c.filter:
-            c.filter = c.filter.resolve_expression(query, allow_joins, reuse, summarize)
+        c.filter = c.filter and c.filter.resolve_expression(query, allow_joins, reuse, summarize)
         if not summarize:
             # Call Aggregate.get_source_expressions() to avoid
             # returning self.filter and including that in this loop.
@@ -67,14 +64,16 @@ class Aggregate(Func):
             if connection.features.supports_aggregate_filter_clause:
                 filter_sql, filter_params = self.filter.as_sql(compiler, connection)
                 template = self.filter_template % extra_context.get('template', self.template)
-                sql, params = super().as_sql(compiler, connection, template=template, filter=filter_sql)
+                sql, params = super().as_sql(
+                    compiler, connection, template=template, filter=filter_sql,
+                    **extra_context
+                )
                 return sql, params + filter_params
             else:
                 copy = self.copy()
                 copy.filter = None
-                condition = When(Q())
                 source_expressions = copy.get_source_expressions()
-                condition.set_source_expressions([self.filter, source_expressions[0]])
+                condition = When(self.filter, then=source_expressions[0])
                 copy.set_source_expressions([Case(condition)] + source_expressions[1:])
                 return super(Aggregate, copy).as_sql(compiler, connection, **extra_context)
         return super().as_sql(compiler, connection, **extra_context)
@@ -96,14 +95,20 @@ class Avg(Aggregate):
             return FloatField()
         return super()._resolve_output_field()
 
-    def as_oracle(self, compiler, connection):
+    def as_mysql(self, compiler, connection, **extra_context):
+        sql, params = super().as_sql(compiler, connection, **extra_context)
+        if self.output_field.get_internal_type() == 'DurationField':
+            sql = 'CAST(%s as SIGNED)' % sql
+        return sql, params
+
+    def as_oracle(self, compiler, connection, **extra_context):
         if self.output_field.get_internal_type() == 'DurationField':
             expression = self.get_source_expressions()[0]
             from django.db.backends.oracle.functions import IntervalToSeconds, SecondsToInterval
             return compiler.compile(
                 SecondsToInterval(Avg(IntervalToSeconds(expression), filter=self.filter))
             )
-        return super().as_sql(compiler, connection)
+        return super().as_sql(compiler, connection, **extra_context)
 
 
 class Count(Aggregate):
@@ -123,8 +128,7 @@ class Count(Aggregate):
         )
 
     def _get_repr_options(self):
-        options = super()._get_repr_options()
-        return dict(options, distinct=self.extra['distinct'] != '')
+        return {**super()._get_repr_options(), 'distinct': self.extra['distinct'] != ''}
 
     def convert_value(self, value, expression, connection):
         return 0 if value is None else value
@@ -149,22 +153,27 @@ class StdDev(Aggregate):
         super().__init__(expression, **extra)
 
     def _get_repr_options(self):
-        options = super()._get_repr_options()
-        return dict(options, sample=self.function == 'STDDEV_SAMP')
+        return {**super()._get_repr_options(), 'sample': self.function == 'STDDEV_SAMP'}
 
 
 class Sum(Aggregate):
     function = 'SUM'
     name = 'Sum'
 
-    def as_oracle(self, compiler, connection):
+    def as_mysql(self, compiler, connection, **extra_context):
+        sql, params = super().as_sql(compiler, connection, **extra_context)
+        if self.output_field.get_internal_type() == 'DurationField':
+            sql = 'CAST(%s as SIGNED)' % sql
+        return sql, params
+
+    def as_oracle(self, compiler, connection, **extra_context):
         if self.output_field.get_internal_type() == 'DurationField':
             expression = self.get_source_expressions()[0]
             from django.db.backends.oracle.functions import IntervalToSeconds, SecondsToInterval
             return compiler.compile(
                 SecondsToInterval(Sum(IntervalToSeconds(expression)))
             )
-        return super().as_sql(compiler, connection)
+        return super().as_sql(compiler, connection, **extra_context)
 
 
 class Variance(Aggregate):
@@ -176,5 +185,4 @@ class Variance(Aggregate):
         super().__init__(expression, **extra)
 
     def _get_repr_options(self):
-        options = super()._get_repr_options()
-        return dict(options, sample=self.function == 'VAR_SAMP')
+        return {**super()._get_repr_options(), 'sample': self.function == 'VAR_SAMP'}

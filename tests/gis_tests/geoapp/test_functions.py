@@ -8,9 +8,10 @@ from django.contrib.gis.geos import (
     GEOSGeometry, LineString, Point, Polygon, fromstr,
 )
 from django.contrib.gis.measure import Area
-from django.db import connection
+from django.db import NotSupportedError, connection
 from django.db.models import Sum
-from django.test import TestCase, skipUnlessDBFeature
+from django.test import TestCase, ignore_warnings, skipUnlessDBFeature
+from django.utils.deprecation import RemovedInDjango30Warning
 
 from ..utils import FuncTestMixin, mysql, oracle, postgis, spatialite
 from .models import City, Country, CountryWebMercator, State, Track
@@ -28,7 +29,7 @@ class GISFunctionsTests(FuncTestMixin, TestCase):
     def test_asgeojson(self):
         # Only PostGIS and SpatiaLite support GeoJSON.
         if not connection.features.has_AsGeoJSON_function:
-            with self.assertRaises(NotImplementedError):
+            with self.assertRaises(NotSupportedError):
                 list(Country.objects.annotate(json=functions.AsGeoJSON('mpoly')))
             return
 
@@ -213,9 +214,24 @@ class GISFunctionsTests(FuncTestMixin, TestCase):
     def test_envelope(self):
         countries = Country.objects.annotate(envelope=functions.Envelope('mpoly'))
         for country in countries:
-            self.assertIsInstance(country.envelope, Polygon)
+            self.assertTrue(country.envelope.equals(country.mpoly.envelope))
+
+    @skipUnlessDBFeature("has_ForcePolygonCW_function")
+    def test_force_polygon_cw(self):
+        rings = (
+            ((0, 0), (5, 0), (0, 5), (0, 0)),
+            ((1, 1), (1, 3), (3, 1), (1, 1)),
+        )
+        rhr_rings = (
+            ((0, 0), (0, 5), (5, 0), (0, 0)),
+            ((1, 1), (3, 1), (1, 3), (1, 1)),
+        )
+        State.objects.create(name='Foo', poly=Polygon(*rings))
+        st = State.objects.annotate(force_polygon_cw=functions.ForcePolygonCW('poly')).get(name='Foo')
+        self.assertEqual(rhr_rings, st.force_polygon_cw.coords)
 
     @skipUnlessDBFeature("has_ForceRHR_function")
+    @ignore_warnings(category=RemovedInDjango30Warning)
     def test_force_rhr(self):
         rings = (
             ((0, 0), (5, 0), (0, 5), (0, 0)),

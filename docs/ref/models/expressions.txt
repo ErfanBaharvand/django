@@ -13,16 +13,20 @@ more complex computations.
 Supported arithmetic
 ====================
 
-Django supports addition, subtraction, multiplication, division, modulo
-arithmetic, and the power operator on query expressions, using Python constants,
-variables, and even other expressions.
+Django supports negation, addition, subtraction, multiplication, division,
+modulo arithmetic, and the power operator on query expressions, using Python
+constants, variables, and even other expressions.
+
+.. versionchanged:: 2.1
+
+    Support for negation was added.
 
 Some examples
 =============
 
 .. code-block:: python
 
-    from django.db.models import F, Count, Value
+    from django.db.models import Count, F, Value
     from django.db.models.functions import Length, Upper
 
     # Find companies that have more employees than chairs.
@@ -60,10 +64,14 @@ Some examples
     # Aggregates can contain complex computations also
     Company.objects.annotate(num_offerings=Count(F('products') + F('services')))
 
-    # Expressions can also be used in order_by()
+    # Expressions can also be used in order_by(), either directly
     Company.objects.order_by(Length('name').asc())
     Company.objects.order_by(Length('name').desc())
-
+    # or using the double underscore lookup syntax.
+    from django.db.models import CharField
+    from django.db.models.functions import Length
+    CharField.register_lookup(Length)
+    Company.objects.order_by('name__length')
 
 Built-in Expressions
 ====================
@@ -220,6 +228,21 @@ primary key value rather than a model instance::
     >> car.built_by
     3
 
+.. _using-f-to-sort-null-values:
+
+Using ``F()`` to sort null values
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Use ``F()`` and the ``nulls_first`` or ``nulls_last`` keyword argument to
+:meth:`.Expression.asc` or :meth:`~.Expression.desc` to control the ordering of
+a field's null values. By default, the ordering depends on your database.
+
+For example, to sort companies that haven't been contacted (``last_contacted``
+is null) after companies that have been contacted::
+
+    from django.db.models import F
+    Company.object.order_by(F('last_contacted').desc(nulls_last=True))
+
 .. _func-expressions:
 
 ``Func()`` expressions
@@ -229,7 +252,7 @@ primary key value rather than a model instance::
 database functions like ``COALESCE`` and ``LOWER``, or aggregates like ``SUM``.
 They can be used directly::
 
-    from django.db.models import Func, F
+    from django.db.models import F, Func
 
     queryset.annotate(field_lower=Func(F('field'), function='LOWER'))
 
@@ -291,20 +314,26 @@ The ``Func`` API is as follows:
         ``arg_joiner``, and any other ``**extra_context`` parameters to
         customize the SQL as needed. For example:
 
-        .. snippet::
-            :filename: django/db/models/functions.py
+        .. code-block:: python
+            :caption: django/db/models/functions.py
 
             class ConcatPair(Func):
                 ...
                 function = 'CONCAT'
                 ...
 
-                def as_mysql(self, compiler, connection):
+                def as_mysql(self, compiler, connection, **extra_context):
                     return super().as_sql(
                         compiler, connection,
                         function='CONCAT_WS',
                         template="%(function)s('', %(expressions)s)",
+                        **extra_context
                     )
+
+        To avoid a SQL injection vulnerability, ``extra_context`` :ref:`must
+        not contain untrusted user input <avoiding-sql-injection-in-query-expressions>`
+        as these values are interpolated into the SQL string rather than passed
+        as query parameters, where the database driver would escape them.
 
 The ``*expressions`` argument is a list of positional expressions that the
 function will be applied to. The expressions will be converted to strings,
@@ -316,10 +345,15 @@ assumed to be column references and will be wrapped in ``F()`` expressions
 while other values will be wrapped in ``Value()`` expressions.
 
 The ``**extra`` kwargs are ``key=value`` pairs that can be interpolated
-into the ``template`` attribute. The ``function``, ``template``, and
-``arg_joiner`` keywords can be used to replace the attributes of the same name
-without having to define your own class. ``output_field`` can be used to define
-the expected return type.
+into the ``template`` attribute. To avoid a SQL injection vulnerability,
+``extra`` :ref:`must not contain untrusted user input
+<avoiding-sql-injection-in-query-expressions>` as these values are interpolated
+into the SQL string rather than passed as query parameters, where the database
+driver would escape them.
+
+The ``function``, ``template``, and ``arg_joiner`` keywords can be used to
+replace the attributes of the same name without having to define your own
+class. ``output_field`` can be used to define the expected return type.
 
 ``Aggregate()`` expressions
 ---------------------------
@@ -339,7 +373,7 @@ some complex computations::
 
 The ``Aggregate`` API is as follows:
 
-.. class:: Aggregate(expression, output_field=None, filter=None, **extra)
+.. class:: Aggregate(*expressions, output_field=None, filter=None, **extra)
 
     .. attribute:: template
 
@@ -355,14 +389,12 @@ The ``Aggregate`` API is as follows:
 
     .. attribute:: window_compatible
 
-        .. versionadded:: 2.0
-
         Defaults to ``True`` since most aggregate functions can be used as the
         source expression in :class:`~django.db.models.expressions.Window`.
 
-The ``expression`` argument can be the name of a field on the model, or another
-expression. It will be converted to a string and used as the ``expressions``
-placeholder within the ``template``.
+The ``expressions`` positional arguments can include expressions or the names
+of model fields. They will be converted to a string and used as the
+``expressions`` placeholder within the ``template``.
 
 The ``output_field`` argument requires a model field instance, like
 ``IntegerField()`` or ``BooleanField()``, into which Django will load the value
@@ -383,10 +415,6 @@ and :ref:`filtering-on-annotations` for example usage.
 
 The ``**extra`` kwargs are ``key=value`` pairs that can be interpolated
 into the ``template`` attribute.
-
-.. versionchanged:: 2.0
-
-    The ``filter`` argument was added.
 
 Creating your own Aggregate Functions
 -------------------------------------
@@ -644,16 +672,22 @@ should avoid them if possible.
 
 .. warning::
 
-    You should be very careful to escape any parameters that the user can
-    control by using ``params`` in order to protect against :ref:`SQL injection
-    attacks <sql-injection-protection>`. ``params`` is a required argument to
-    force you to acknowledge that you're not interpolating your SQL with user
-    provided data.
+    To protect against `SQL injection attacks
+    <https://en.wikipedia.org/wiki/SQL_injection>`_, you must escape any
+    parameters that the user can control by using ``params``. ``params`` is a
+    required argument to force you to acknowledge that you're not interpolating
+    your SQL with user-provided data.
+
+    You also must not quote placeholders in the SQL string. This example is
+    vulnerable to SQL injection because of the quotes around ``%s``::
+
+        RawSQL("select col from sometable where othercol = '%s'")  # unsafe!
+
+    You can read more about how Django's :ref:`SQL injection protection
+    <sql-injection-protection>` works.
 
 Window functions
 ----------------
-
-.. versionadded:: 2.0
 
 Window functions provide a way to apply functions on partitions. Unlike a
 normal aggregation function which computes a final result for each set defined
@@ -703,7 +737,8 @@ computation. See :ref:`window-frames` for details.
 For example, to annotate each movie with the average rating for the movies by
 the same studio in the same genre and release year::
 
-    >>> from django.db.models import Avg, ExtractYear, F, Window
+    >>> from django.db.models import Avg, F, Window
+    >>> from django.db.models.functions import ExtractYear
     >>> Movie.objects.annotate(
     >>>     avg_rating=Window(
     >>>         expression=Avg('rating'),
@@ -721,9 +756,10 @@ genre, and release year) by using three window functions in the same query. The
 partition and ordering from the previous example is extracted into a dictionary
 to reduce repetition::
 
-    >>> from django.db.models import Avg, ExtractYear, F, Max, Min, Window
+    >>> from django.db.models import Avg, F, Max, Min, Window
+    >>> from django.db.models.functions import ExtractYear
     >>> window = {
-    >>>    'partition': [F('studio'), F('genre')],
+    >>>    'partition_by': [F('studio'), F('genre')],
     >>>    'order_by': ExtractYear('released').asc(),
     >>> }
     >>> Movie.objects.annotate(
@@ -802,7 +838,8 @@ If a movie's "peers" are described as movies released by the same studio in the
 same genre in the same year, this ``RowRange`` example annotates each movie
 with the average rating of a movie's two prior and two following peers::
 
-    >>> from django.db.models import Avg, ExtractYear, F, RowRange, Window
+    >>> from django.db.models import Avg, F, RowRange, Window
+    >>> from django.db.models.functions import ExtractYear
     >>> Movie.objects.annotate(
     >>>     avg_rating=Window(
     >>>         expression=Avg('rating'),
@@ -858,23 +895,17 @@ calling the appropriate methods on the wrapped expression.
 
     .. attribute:: contains_over_clause
 
-        .. versionadded:: 2.0
-
         Tells Django that this expression contains a
         :class:`~django.db.models.expressions.Window` expression. It's used,
         for example, to disallow window function expressions in queries that
-        modify data. Defaults to ``True``.
+        modify data.
 
     .. attribute:: filterable
-
-        .. versionadded:: 2.0
 
         Tells Django that this expression can be referenced in
         :meth:`.QuerySet.filter`. Defaults to ``True``.
 
     .. attribute:: window_compatible
-
-        .. versionadded:: 2.0
 
         Tells Django that this expression can be used as the source expression
         in :class:`~django.db.models.expressions.Window`. Defaults to
@@ -942,12 +973,14 @@ calling the appropriate methods on the wrapped expression.
         Returns the expression ready to be sorted in ascending order.
 
         ``nulls_first`` and ``nulls_last`` define how null values are sorted.
+        See :ref:`using-f-to-sort-null-values` for example usage.
 
     .. method:: desc(nulls_first=False, nulls_last=False)
 
         Returns the expression ready to be sorted in descending order.
 
         ``nulls_first`` and ``nulls_last`` define how null values are sorted.
+        See :ref:`using-f-to-sort-null-values` for example usage.
 
     .. method:: reverse_ordering()
 
@@ -1066,6 +1099,45 @@ Let's see how it works::
     Apple: AAPL
     Yahoo: Internet Company
     Django Software Foundation: No Tagline
+
+.. _avoiding-sql-injection-in-query-expressions:
+
+Avoiding SQL injection
+~~~~~~~~~~~~~~~~~~~~~~
+
+Since a ``Func``'s keyword arguments for ``__init__()``  (``**extra``) and
+``as_sql()`` (``**extra_context``) are interpolated into the SQL string rather
+than passed as query parameters (where the database driver would escape them),
+they must not contain untrusted user input.
+
+For example, if ``substring`` is user-provided, this function is vulnerable to
+SQL injection::
+
+    from django.db.models import Func
+
+    class Position(Func):
+        function = 'POSITION'
+        template = "%(function)s('%(substring)s' in %(expressions)s)"
+
+        def __init__(self, expression, substring):
+            # substring=substring is a SQL injection vulnerability!
+            super().__init__(expression, substring=substring)
+
+This function generates a SQL string without any parameters. Since ``substring``
+is passed to ``super().__init__()`` as a keyword argument, it's interpolated
+into the SQL string before the query is sent to the database.
+
+Here's a corrected rewrite::
+
+    class Position(Func):
+        function = 'POSITION'
+        arg_joiner = ' IN '
+
+        def __init__(self, expression, substring):
+            super().__init__(substring, expression)
+
+With ``substring`` instead passed as a positional argument, it'll be passed as
+a parameter in the database query.
 
 Adding support in third-party database backends
 -----------------------------------------------

@@ -14,6 +14,7 @@ import sys
 from wsgiref import simple_server
 
 from django.core.exceptions import ImproperlyConfigured
+from django.core.handlers.wsgi import LimitedStream
 from django.core.wsgi import get_wsgi_application
 from django.utils.module_loading import import_string
 
@@ -74,11 +75,41 @@ class WSGIServer(simple_server.WSGIServer):
 
 class ThreadedWSGIServer(socketserver.ThreadingMixIn, WSGIServer):
     """A threaded version of the WSGIServer"""
-    pass
+    daemon_threads = True
 
 
 class ServerHandler(simple_server.ServerHandler):
     http_version = '1.1'
+
+    def __init__(self, stdin, stdout, stderr, environ, **kwargs):
+        """
+        Setup a limited stream, so we can discard unread request data
+        at the end of the request. Django already uses `LimitedStream`
+        in `WSGIRequest` but it shouldn't discard the data since the
+        upstream servers usually do this. Hence we fix this only for
+        our testserver/runserver.
+        """
+        try:
+            content_length = int(environ.get('CONTENT_LENGTH'))
+        except (ValueError, TypeError):
+            content_length = 0
+        super().__init__(LimitedStream(stdin, content_length), stdout, stderr, environ, **kwargs)
+
+    def cleanup_headers(self):
+        super().cleanup_headers()
+        # HTTP/1.1 requires us to support persistent connections, so
+        # explicitly send close if we do not know the content length to
+        # prevent clients from reusing the connection.
+        if 'Content-Length' not in self.headers:
+            self.headers['Connection'] = 'close'
+        # Mark the connection for closing if we set it as such above or
+        # if the application sent the header.
+        if self.headers.get('Connection') == 'close':
+            self.request_handler.close_connection = True
+
+    def close(self):
+        self.get_stdin()._read_limited()
+        super().close()
 
     def handle_error(self):
         # Ignore broken pipe errors, otherwise pass on
@@ -128,13 +159,23 @@ class WSGIRequestHandler(simple_server.WSGIRequestHandler):
         # the WSGI environ. This prevents header-spoofing based on ambiguity
         # between underscores and dashes both normalized to underscores in WSGI
         # env vars. Nginx and Apache 2.4+ both do this as well.
-        for k, v in self.headers.items():
+        for k in self.headers:
             if '_' in k:
                 del self.headers[k]
 
         return super().get_environ()
 
     def handle(self):
+        self.close_connection = True
+        self.handle_one_request()
+        while not self.close_connection:
+            self.handle_one_request()
+        try:
+            self.connection.shutdown(socket.SHUT_WR)
+        except (socket.error, AttributeError):
+            pass
+
+    def handle_one_request(self):
         """Copy of WSGIRequestHandler.handle() but with different ServerHandler"""
         self.raw_requestline = self.rfile.readline(65537)
         if len(self.raw_requestline) > 65536:
@@ -150,7 +191,7 @@ class WSGIRequestHandler(simple_server.WSGIRequestHandler):
         handler = ServerHandler(
             self.rfile, self.wfile, self.get_stderr(), self.get_environ()
         )
-        handler.request_handler = self      # backpointer for logging
+        handler.request_handler = self      # backpointer for logging & connection closing
         handler.run(self.server.get_app())
 
 

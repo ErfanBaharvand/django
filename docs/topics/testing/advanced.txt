@@ -25,7 +25,7 @@ restricted subset of the test client API:
   :meth:`~Client.options()`, and :meth:`~Client.trace()`.
 
 * These methods accept all the same arguments *except* for
-  ``follows``. Since this is just a factory for producing
+  ``follow``. Since this is just a factory for producing
   requests, it's up to you to handle the response.
 
 * It does not support middleware. Session and authentication
@@ -38,7 +38,7 @@ Example
 The following is a simple unit test using the request factory::
 
     from django.contrib.auth.models import AnonymousUser, User
-    from django.test import TestCase, RequestFactory
+    from django.test import RequestFactory, TestCase
 
     from .views import MyView, my_view
 
@@ -249,7 +249,7 @@ Advanced features of ``TransactionTestCase``
     By default, ``available_apps`` is set to ``None``. After each test, Django
     calls :djadmin:`flush` to reset the database state. This empties all tables
     and emits the :data:`~django.db.models.signals.post_migrate` signal, which
-    re-creates one content type and three permissions for each model. This
+    recreates one content type and four permissions for each model. This
     operation gets expensive proportionally to the number of models.
 
     Setting ``available_apps`` to a list of applications instructs Django to
@@ -298,7 +298,7 @@ Advanced features of ``TransactionTestCase``
     recommended that you do not hard code primary key values in tests.
 
     Using ``reset_sequences = True`` will slow down the test, since the primary
-    key reset is an relatively expensive database operation.
+    key reset is a relatively expensive database operation.
 
 .. _testing-reusable-applications:
 
@@ -325,8 +325,8 @@ following structure::
 
 Let's take a look inside a couple of those files:
 
-.. snippet::
-    :filename: runtests.py
+.. code-block:: python
+    :caption: runtests.py
 
     #!/usr/bin/env python
     import os
@@ -353,8 +353,8 @@ necessary to use the Django test runner. You may want to add
 command-line options for controlling verbosity, passing in specific test
 labels to run, etc.
 
-.. snippet::
-    :filename: tests/test_settings.py
+.. code-block:: python
+    :caption: tests/test_settings.py
 
     SECRET_KEY = 'fake-key'
     INSTALLED_APPS = [
@@ -715,5 +715,5 @@ listed here because of the ``source`` flag passed to the previous command.
 For more options like annotated HTML listings detailing missed lines, see the
 `coverage.py`_ docs.
 
-.. _coverage.py: http://coverage.readthedocs.io/
-.. _install coverage.py: https://pypi.python.org/pypi/coverage
+.. _coverage.py: https://coverage.readthedocs.io/
+.. _install coverage.py: https://pypi.org/project/coverage/

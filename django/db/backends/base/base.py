@@ -395,7 +395,7 @@ class BaseDatabaseWrapper:
 
         start_transaction_under_autocommit = (
             force_begin_transaction_with_broken_autocommit and not autocommit and
-            self.features.autocommits_when_autocommit_is_off
+            hasattr(self, '_start_transaction_under_autocommit')
         )
 
         if start_transaction_under_autocommit:
@@ -573,11 +573,10 @@ class BaseDatabaseWrapper:
         Provide a cursor: with self.temporary_connection() as cursor: ...
         """
         must_close = self.connection is None
-        cursor = self.cursor()
         try:
-            yield cursor
+            with self.cursor() as cursor:
+                yield cursor
         finally:
-            cursor.close()
             if must_close:
                 self.close()
 
@@ -590,21 +589,10 @@ class BaseDatabaseWrapper:
         potential child threads while (or after) the test database is destroyed.
         Refs #10868, #17786, #16969.
         """
-        settings_dict = self.settings_dict.copy()
-        settings_dict['NAME'] = None
-        nodb_connection = self.__class__(
-            settings_dict,
+        return self.__class__(
+            {**self.settings_dict, 'NAME': None},
             alias=NO_DB_ALIAS,
-            allow_thread_sharing=False)
-        return nodb_connection
-
-    def _start_transaction_under_autocommit(self):
-        """
-        Only required when autocommits_when_autocommit_is_off = True.
-        """
-        raise NotImplementedError(
-            'subclasses of BaseDatabaseWrapper may require a '
-            '_start_transaction_under_autocommit() method'
+            allow_thread_sharing=False,
         )
 
     def schema_editor(self, *args, **kwargs):
